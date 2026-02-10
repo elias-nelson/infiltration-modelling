@@ -1,4 +1,4 @@
-#############################################################################
+################################################################################
 #
 #  InfiltraStat: R functions for infiltration modelling, geostatistics,
 #  and spatial soil analysis developed for research on soil water dynamics
@@ -16,15 +16,15 @@
 #
 #  License: GNU General Public License v3.0
 #
-#############################################################################
+################################################################################
 
-vers <- "v0.1 Initial development"
+vers <- "v0.1 Initial development:"
 
 header <- "
 InfiltraStat is a set of R functions developed for analysing soil
 infiltration processes, hydraulic behaviour, and spatial variability
 in agricultural landscapes. The code is distributed under the terms
-of the GNU General Public License v3.0, without warranty.
+of the GNU General Public License v3.0, without liabilty and warranty.
 "
 
 fnclist <- "
@@ -36,162 +36,424 @@ Current function groups:
 "
 
 
-cat(paste("CEPHaStat version ",vers))
+cat(paste("InfiltraStat version ",vers))
 cat(header)
 cat(fnclist)
-#############################################################################
 
-skew<-function(x){
-
-# compute coefficient of skewness of data in x
-
-x<-na.drop(x)
-n<-length(x)
-xd<-x-mean(x)
-mu3<-sum(xd^3)/(n-1)
-mu<-sqrt(sum(xd^2)/(n-1))
-sk<-mu3/(mu^3)
-return(sk)
+#-------------------------------------------------------------------------------
+# Compute sample skewness of a numeric vector
+#
+# Uses bias-corrected moment coefficient of skewness.
+# Normal distribution -> skewness = 0
+#-------------------------------------------------------------------------------
+skew <- function(x, na.rm = TRUE) {
+  
+  if (na.rm) x <- stats::na.omit(x)
+  
+  n <- length(x)
+  
+  if (n < 3)
+    stop("skew() requires at least 3 observations.")
+  
+  mu <- mean(x)
+  sd_x <- stats::sd(x)
+  
+  if (sd_x == 0)
+    stop("skew undefined for zero-variance data.")
+  
+  sk <- (n / ((n - 1) * (n - 2))) *
+    sum(((x - mu) / sd_x)^3)
+  
+  return(sk)
 }
 
-#############################################################################
-
-kurt<-function(x){
-
-# compute coefficient of kurtosis of data in x
-
-x<-na.drop(x)
-n<-length(x)
-xd<-x-mean(x)
-mu4<-sum(xd^4)/(n-1)
-mu<-sqrt(sum(xd^2)/(n-1))
-sk<-(mu4/(mu^4))-3
-return(sk)
+#-------------------------------------------------------------------------------
+# Compute kurtosis of a numeric vector
+#
+# Returns excess kurtosis by default.
+#
+# Normal distribution:
+#   - Pearson kurtosis = 3
+#   - Excess kurtosis  = 0
+#-------------------------------------------------------------------------------
+kurt <- function(x, na.rm = TRUE, excess = TRUE) {
+  
+  if (na.rm) {
+    x <- stats::na.omit(x)
+  }
+  
+  if (length(x) < 3) {
+    stop("kurt() requires at least 3 observations.")
+  }
+  
+  mu <- mean(x)
+  xc <- x - mu
+  
+  s2 <- mean(xc^2)   # population variance
+  
+  if (s2 == 0) {
+    stop("kurt() is undefined for zero-variance data.")
+  }
+  
+  m4 <- mean(xc^4)   # fourth central moment
+  
+  k <- m4 / (s2^2)
+  
+  if (excess) {
+    k <- k - 3
+  }
+  
+  return(k)
 }
+
+#-------------------------------------------------------------------------------
+# Compute octile skewness
+#
+# Robust skewness based on octiles (12.5%, 50%, 87.5%).
+# Less sensitive to outliers than moment skewness.
+# Useful for skewed soil and environmental data.
+#-------------------------------------------------------------------------------
+octile_skew <- function(x, na.rm = TRUE, type = 7) {
+  
+  if (na.rm) x <- stats::na.omit(x)
+  
+  n <- length(x)
+  if (n < 3)
+    stop("octile_skew() requires at least 3 observations.")
+  
+  q <- stats::quantile(x, probs = c(1/8, 1/2, 7/8),
+                       names = FALSE, type = type)
+  
+  denom <- q[3] - q[1]
+  
+  if (denom == 0)
+    return(0)  # no spread → symmetric by definition
+  
+  os <- ((q[3] - q[2]) - (q[2] - q[1])) / denom
+  
+  return(os)
+}
+
+#-------------------------------------------------------------------------------
+# Internal: compute Tukey fences and outlier diagnostics
+#-------------------------------------------------------------------------------
+.tukey_stats <- function(x) {
+  
+  q1 <- stats::quantile(x, 0.25, names = FALSE)
+  q2 <- stats::quantile(x, 0.50, names = FALSE)
+  q3 <- stats::quantile(x, 0.75, names = FALSE)
+  
+  iqr <- q3 - q1
+  
+  inner_low  <- q1 - 1.5 * iqr
+  inner_high <- q3 + 1.5 * iqr
+  
+  outer_low  <- q1 - 3 * iqr
+  outer_high <- q3 + 3 * iqr
+  
+  list(
+    q1 = q1, q2 = q2, q3 = q3,
+    inner_low = inner_low,
+    inner_high = inner_high,
+    outer_low = outer_low,
+    outer_high = outer_high,
+    mild_outliers    = which(x < inner_low | x > inner_high),
+    extreme_outliers = which(x < outer_low | x > outer_high)
+  )
+}
+
+#-------------------------------------------------------------------------------
+# Summary statistics for a numeric vector
+#-------------------------------------------------------------------------------
+summary_stats <- function(x, decimals = NULL, na.rm = TRUE, detailed_outliers = FALSE) {
+  
+  if (na.rm) x <- stats::na.omit(x)
+  
+  if (!is.numeric(x))
+    stop("summary_stats() requires a numeric vector.")
+  
+  if (length(x) < 3)
+    stop("summary_stats() requires at least 3 observations.")
+  
+  tk <- .tukey_stats(x)   # your internal Tukey stats function
+  
+  # ---------------------------
+  # Core statistics
+  # ---------------------------
+  out <- data.frame(
+    "Mean"            = mean(x),
+    "Median"          = tk$q2,
+    "Q1"              = tk$q1,
+    "Q3"              = tk$q3,
+    "Variance"        = stats::var(x),
+    "SD"              = stats::sd(x),
+    "Skewness"        = skew(x),
+    "Octile Skewness" = octile_skew(x),
+    "Kurtosis"        = kurt(x),
+    "No. Outliers"    = length(union(tk$mild_outliers, tk$extreme_outliers)),
+    check.names = FALSE
+  )
+  
+  # ---------------------------
+  # Optional detailed outliers
+  # ---------------------------
+  if (detailed_outliers) {
+    out$N_Mild_Outliers    <- length(tk$mild_outliers)
+    out$N_Extreme_Outliers <- length(tk$extreme_outliers)
+    out$Inner_Lower_Fence  <- tk$inner_low
+    out$Inner_Upper_Fence  <- tk$inner_high
+    out$Outer_Lower_Fence  <- tk$outer_low
+    out$Outer_Upper_Fence  <- tk$outer_high
+  }
+  
+  # ---------------------------
+  # Apply decimal places if requested
+  # ---------------------------
+  if (!is.null(decimals)) {
+    out <- round(out, decimals)
+  }
+  
+  return(out)
+}
+
+#-------------------------------------------------------------------------------
+# Diagnostic plots:
+#   Histogram + Tukey box overlay + Normal Q-Q plot
+#-------------------------------------------------------------------------------
+summary_plot <- function(x, varname = "x", na.rm = TRUE) {
+  
+  if (na.rm) x <- stats::na.omit(x)
+  
+  if (!is.numeric(x))
+    stop("summary_plot requires a numeric vector.")
+  
+  tk <- .tukey_stats(x)
+  
+  oldpar <- par(no.readonly = TRUE)
+  on.exit(par(oldpar))
+  
+  par(mfrow = c(1, 2))
+  
+  # ---------------------------
+  # Histogram with Tukey box overlay
+  # ---------------------------
+  h <- hist(x, plot = FALSE)
+  ymax <- max(h$counts)
+  
+  hist(x,
+       col = "lightblue",
+       border = "#000000",
+       breaks = 30,
+       main = "",
+       xlab = varname,
+       ylim = c(0, ymax * 1.25))
+  
+  box_ymin <- ymax * 1.10
+  box_ymax <- ymax * 1.20
+  box_mid  <- ymax * 1.15
+  
+  # box
+  segments(tk$q1, box_ymin, tk$q3, box_ymin)
+  segments(tk$q1, box_ymax, tk$q3, box_ymax)
+  segments(tk$q1, box_ymin, tk$q1, box_ymax)
+  segments(tk$q3, box_ymin, tk$q3, box_ymax)
+  
+  # whiskers (using inner fences)
+  inliers <- x[x >= tk$inner_low & x <= tk$inner_high]
+  lw <- min(inliers)
+  uw <- max(inliers)
+  
+  segments(lw, box_mid, tk$q1, box_mid, lty = 2)
+  segments(tk$q3, box_mid, uw, box_mid, lty = 2)
+  
+  # ---------------------------
+  # Whisker end caps (adjacent values)
+  # ---------------------------
+  cap_half_height <- (box_ymax - box_ymin) * 0.15
+  
+  segments(lw, box_mid - cap_half_height, lw, box_mid + cap_half_height, lwd = 2.5)
+  segments(uw, box_mid - cap_half_height, uw, box_mid + cap_half_height, lwd = 2.5)
+  
+  # median
+  segments(tk$q2, box_ymin, tk$q2, box_ymax, lwd = 2)
+  
+  # ---------------------------
+  # Mean (red thick)
+  # ---------------------------
+  mu <- mean(x)
+  segments(mu, box_ymin, mu, box_ymax, lwd = 2, col = "red", lty = 2)
+  
+  
+  # ---------------------------
+  # Jittered raw data points
+  # ---------------------------
+  set.seed(1)  # reproducible jitter
+  points(
+    jitter(x, amount = diff(range(x)) * 0.01),
+    runif(length(x), box_ymin, box_ymax),
+    pch = 21,  # filled circle with border
+    bg = adjustcolor("steelblue", alpha.f = 0.3),  # fill color with transparency
+    col = "black",  # border color
+    cex = .65
+  )
+  
+  # inner fences (mild outliers)
+  abline(v = tk$inner_low,  col = "orange", lty = 2)
+  abline(v = tk$inner_high, col = "orange", lty = 2)
+  
+  # inner fences (extreme outliers)
+  abline(v = tk$outer_low,  col = "red", lty = 2)
+  abline(v = tk$outer_high, col = "red", lty = 2)
+  
+  # ---------------------------
+  # Normal Q-Q plot
+  # ---------------------------
+  qq <- qqnorm(x, main = "", pch = 21, col = "black", bg = adjustcolor("steelblue", alpha.f = 0.3))
+  qqline(x, col = "blue", lty = 2)
+  
+  # ---------------------------
+  # Mild outliers (orange)
+  # ---------------------------
+  if (length(tk$mild_outliers) > 0) {
+    points(qq$x[tk$mild_outliers],
+           qq$y[tk$mild_outliers],
+           pch = 21,
+           bg = adjustcolor("orange", alpha.f = 0.8),
+           col = "black")
+  }
+  
+  # ---------------------------
+  # Extreme outliers (red)
+  # ---------------------------
+  if (length(tk$extreme_outliers) > 0) {
+    points(qq$x[tk$extreme_outliers],
+           qq$y[tk$extreme_outliers],
+           pch = 21,
+           bg = adjustcolor("red", alpha.f = 0.8),
+           col = "black")
+  }
+}
+
+#-------------------------------------------------------------------------------
+# Histogram with Tukey boxplot overlay and outlier fences
+#
+# Colors:
+#   Orange → mild outlier limits (±1.5 IQR)
+#   Red    → extreme outlier limits (±3 IQR)
+#-------------------------------------------------------------------------------
+hist_plot <- function(x, varname = "x", na.rm = TRUE) {
+  
+  # ---------------------------
+  # Input checks
+  # ---------------------------
+  if (na.rm) x <- stats::na.omit(x)
+  
+  if (!is.numeric(x))
+    stop("hist_plot() requires a numeric vector.")
+  
+  if (length(x) < 3)
+    stop("hist_plot() requires at least 3 observations.")
+  
+  # ---------------------------
+  # Tukey statistics
+  # ---------------------------
+  tk <- .tukey_stats(x)
+  
+  # ---------------------------
+  # Histogram base
+  # ---------------------------
+  par(mfrow = c(1, 1))
+  
+  h <- hist(x, plot = FALSE)
+  ymax <- max(h$counts)
+  
+  hist(x,
+       col = "lightblue",
+       border = "#000000",
+       breaks = 30,
+       main = "",
+       xlab = varname,
+       ylim = c(0, ymax * 1.25))
+  
+  # ---------------------------
+  # Vertical span for boxplot inside histogram
+  # ---------------------------
+  box_ymin <- ymax * 1.10
+  box_ymax <- ymax * 1.20
+  box_mid  <- (box_ymin + box_ymax) / 2
+  
+  # ---------------------------
+  # Draw IQR box
+  # ---------------------------
+  rect(tk$q1, box_ymin, tk$q3, box_ymax, border = "black", col = NA)
+  
+  # End caps at Q1 and Q3 (small horizontal ticks)
+  segments(tk$q1, box_ymin, tk$q1, box_ymax, lwd = 2)
+  segments(tk$q3, box_ymin, tk$q3, box_ymax, lwd = 2)
+  
+  # ---------------------------
+  # Whiskers (non-outlier range)
+  # ---------------------------
+  inliers <- x[x >= tk$inner_low & x <= tk$inner_high]
+  lw <- min(inliers)
+  uw <- max(inliers)
+  
+  segments(lw, box_mid, tk$q1, box_mid, lwd = 1.5, lty = 2)
+  segments(tk$q3, box_mid, uw, box_mid, lwd = 1.5, lty = 2)
+  
+  # ---------------------------
+  # Whisker end caps (adjacent values)
+  # ---------------------------
+  cap_half_height <- (box_ymax - box_ymin) * 0.15
+  
+  segments(lw, box_mid - cap_half_height, lw, box_mid + cap_half_height, lwd = 2.5)
+  segments(uw, box_mid - cap_half_height, uw, box_mid + cap_half_height, lwd = 2.5)
+  
+  # ---------------------------
+  # Median (black thick)
+  # ---------------------------
+  segments(tk$q2, box_ymin, tk$q2, box_ymax, lwd = 2.5)
+  
+  # ---------------------------
+  # Median (black thick)
+  # ---------------------------
+  segments(tk$q2, box_ymin, tk$q2, box_ymax, lwd = 2.5, col = "black")
+  
+  # ---------------------------
+  # Mean (red thick)
+  # ---------------------------
+  mu <- mean(x)
+  segments(mu, box_ymin, mu, box_ymax, lwd = 2, col = "red", lty = 2)
+  
+  
+  # ---------------------------
+  # Jittered raw data points
+  # ---------------------------
+  set.seed(1)  # reproducible jitter
+  points(
+    jitter(x, amount = diff(range(x)) * 0.01),
+    runif(length(x), box_ymin, box_ymax),
+    pch = 21,  # filled circle with border
+    bg = adjustcolor("steelblue", alpha.f = 0.3),  # fill color with transparency
+    col = "black",  # border color
+    cex = 1
+  )
+  
+  # ---------------------------
+  # Mild outlier fences (orange)
+  # ---------------------------
+  abline(v = tk$inner_low,  col = "orange", lty = 2, lwd = 2)
+  abline(v = tk$inner_high, col = "orange", lty = 2, lwd = 2)
+  
+  # ---------------------------
+  # Extreme outlier fences (red)
+  # ---------------------------
+  abline(v = tk$outer_low,  col = "red", lty = 2, lwd = 2)
+  abline(v = tk$outer_high, col = "red", lty = 2, lwd = 2)
+}
+
 
 ################################################################################
-
-ocskew<-function(x){
-
-# compute the octile skewness of values in x
-
-x<-na.drop(x)
-Ocs<-quantile(x,c(1/8,0.5,7/8))
-os<-((Ocs[3]-Ocs[2])-(Ocs[2]-Ocs[1]))/(Ocs[3]-Ocs[1])
-return(os)
-}
-
-###########################################################################
-
-summa<-function(x,sigf){
-
-# compute summary statistics of values in x
-
-if(missing(sigf)){rosig<-F}else{rosig<-T}
-
-
-x<-na.drop(x)
-Q1<-quantile(x,prob=0.25)
-Q3<-quantile(x,prob=0.75)
-Q2<-quantile(x,prob=0.5)
-hspread<-Q3-Q1
-Fu<-Q3+3*hspread
-Fl<-Q1-3*hspread
-
-# ols,oll: values below and above outer fences
-# posols,posoll: values below and above inner fences 
-# (so ols and posols overlap, as do oll and posoll
-#
-
-ols<-which(x<Fl)
-oll<-which(x>Fu)
-posols<-which(x<(Q1-1.5*hspread))
-if(length(posols)==0){
-lw<-min(x)}else{
-lw<-min(x[-posols])}
-posoll<-which(x>(Q3+1.5*hspread))
-if(length(posoll)==0){
-uw<-max(x)}else{
-uw<-max(x[-posoll])}
-
-ol<-c(ols,oll) # combined outlier set
-
-nol<-length(ol)
-
-outp<-matrix(c(mean(x),Q2,Q1,Q3,var(x),sqrt(var(x)),skew(x),ocskew(x),kurt(x),nol),1,10)
-
-if(rosig=="TRUE"){outp<-signif(outp,sigf)}
-
-colnames(outp)<-c("Mean","Median",
-"Quartile.1", "Quartile.3","Variance","SD","Skewness",
-"Octile skewness","Kurtosis",
-"No. outliers")
-
-
-return(outp)
-
-}
-
-####################################################################
-
-summaplot<-function(x,varname){
-
-# plot a histogram with boxplot and QQ plot of data in x indicating
-# any probable outliers by Tukey's criterion
-
-x<-na.drop(x)
-if(missing(varname)){varname<-"x"}
-
-Q1<-quantile(x,prob=0.25)
-Q3<-quantile(x,prob=0.75)
-Q2<-quantile(x,prob=0.5)
-hspread<-Q3-Q1
-Fu<-Q3+3*hspread
-Fl<-Q1-3*hspread
-
-
-# ols,oll: values below and above outer fences
-# posols,posoll: values below and above inner fences 
-# (so ols and posols overlap, as do oll and posoll
-#
-ols<-which(x<Fl)
-oll<-which(x>Fu)
-posols<-which(x<(Q1-1.5*hspread))
-if(length(posols)==0){
-lw<-min(x)}else{
-lw<-min(x[-posols])}
-posoll<-which(x>(Q3+1.5*hspread))
-if(length(posoll)==0){
-uw<-max(x)}else{
-uw<-max(x[-posoll])}
-
-ol<-c(ols,oll) # combined outlier set
-par(mfrow=c(1,2))
-ymax<-max((hist(x,plot=F))$counts)
-hist(x,main="",col="AliceBlue", xlab=varname,ylim=c(0,(ymax*1.25)))
-
-boxmin<-ymax*1.1
-boxmax<-ymax*1.2
-boxmid<-ymax*1.15
-
-lines(c(Q1,Q3),c(boxmin,boxmin))
-lines(c(Q1,Q3),c(boxmax,boxmax))
-lines(c(Q1,Q1),c(boxmin,boxmax))
-lines(c(Q3,Q3),c(boxmin,boxmax))
-lines(c(Q1,lw),c(boxmid,boxmid))
-lines(c(Q3,uw),c(boxmid,boxmid))
-lines(c(Q2,Q2),c(boxmin,boxmax),lwd=2)
-
-lines(c(Fu,Fu),c(10,boxmid),lty=5,col="red")
-lines(c(Fl,Fl),c(10,boxmid),lty=5,col="red")
-
-qqn<-qqnorm(x,main="",pch=16)
-qqline(x)
-points(qqn$x[ol],qqn$y[ol],pch=16,col="red")
-
-}
-####################################################################
-
 histplot<-function(x,varname){
 
 # plot a histogram with boxplot in x indicating
