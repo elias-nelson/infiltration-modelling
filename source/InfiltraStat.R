@@ -36,9 +36,9 @@ Current function groups:
 "
 
 
-cat(paste("InfiltraStat version ",vers))
-cat(header)
-cat(fnclist)
+cat(crayon::bold(crayon::cyan(paste("InfiltraStat version ",vers))))
+cat(crayon::bold(crayon::cyan(header)))
+cat(crayon::bold(crayon::cyan(fnclist)))
 
 #-------------------------------------------------------------------------------
 # Compute sample skewness of a numeric vector
@@ -220,12 +220,12 @@ summary_stats <- function(x, decimals = NULL, na.rm = TRUE, detailed_outliers = 
 # Diagnostic plots:
 #   Histogram + Tukey box overlay + Normal Q-Q plot
 #-------------------------------------------------------------------------------
-summary_plot <- function(x, varname = "x", na.rm = TRUE) {
+plot_summary <- function(x, varname = "x", na.rm = TRUE) {
   
   if (na.rm) x <- stats::na.omit(x)
   
   if (!is.numeric(x))
-    stop("summary_plot requires a numeric vector.")
+    stop("plot_summary requires a numeric vector.")
   
   tk <- .tukey_stats(x)
   
@@ -341,7 +341,7 @@ summary_plot <- function(x, varname = "x", na.rm = TRUE) {
 #   Orange → mild outlier limits (±1.5 IQR)
 #   Red    → extreme outlier limits (±3 IQR)
 #-------------------------------------------------------------------------------
-hist_plot <- function(x, varname = "x", na.rm = TRUE) {
+plot_hist <- function(x, varname = "x", na.rm = TRUE) {
   
   # ---------------------------
   # Input checks
@@ -349,10 +349,10 @@ hist_plot <- function(x, varname = "x", na.rm = TRUE) {
   if (na.rm) x <- stats::na.omit(x)
   
   if (!is.numeric(x))
-    stop("hist_plot() requires a numeric vector.")
+    stop("plot_hist() requires a numeric vector.")
   
   if (length(x) < 3)
-    stop("hist_plot() requires at least 3 observations.")
+    stop("plot_hist() requires at least 3 observations.")
   
   # ---------------------------
   # Tukey statistics
@@ -450,6 +450,379 @@ hist_plot <- function(x, varname = "x", na.rm = TRUE) {
   # ---------------------------
   abline(v = tk$outer_low,  col = "red", lty = 2, lwd = 2)
   abline(v = tk$outer_high, col = "red", lty = 2, lwd = 2)
+}
+
+###############################################################################
+# Infiltration equations
+###############################################################################
+
+# 1 Horton Infiltration Equation
+fit_horton <- function(data = NULL, time, rate, na.rm = TRUE) {
+  
+  # ---------------------------
+  # Extract from data if provided
+  # ---------------------------
+  if (!is.null(data)) {
+    time  <- data[[deparse(substitute(time))]]
+    infil <- data[[deparse(substitute(rate))]]
+  } else {
+    infil <- rate
+  }
+  
+  # ---------------------------
+  # Input checks
+  # ---------------------------
+  if (na.rm) {
+    ok <- stats::complete.cases(time, infil)
+    time  <- time[ok]
+    infil <- infil[ok]
+  }
+  
+  if (!is.numeric(time) || !is.numeric(infil))
+    stop("time and rate must be numeric.")
+  
+  if (length(time) < 5)
+    stop("At least 5 observations are required.")
+  
+  # ---------------------------
+  # Ensure time is increasing
+  # ---------------------------
+  ord <- order(time)
+  time  <- time[ord]
+  infil <- infil[ord]
+  
+  # ---------------------------
+  # Horton equation
+  # ---------------------------
+  horton_fun <- function(t, fc, f0, k) {
+    fc + (f0 - fc) * exp(-k * t)
+  }
+  
+  # ---------------------------
+  # Smart starting values
+  # ---------------------------
+  f0_start <- infil[1]
+  fc_start <- mean(tail(infil, max(3, floor(length(infil) * 0.1))))
+  
+  eps <- 1e-6
+  valid <- infil > fc_start + eps
+  
+  if (sum(valid) >= 2) {
+    y_lin <- log(infil[valid] - fc_start)
+    k_start <- -coef(stats::lm(y_lin ~ time[valid]))[2]
+  } else {
+    k_start <- 0.01
+  }
+  
+  k_start <- max(k_start, 1e-4)
+  
+  # ---------------------------
+  # Nonlinear fit with bounds
+  # ---------------------------
+  fit <- minpack.lm::nlsLM(
+    infil ~ horton_fun(time, fc, f0, k),
+    start = list(fc = fc_start, f0 = f0_start, k = k_start),
+    lower = c(fc = 0, f0 = 0, k = 0),
+    control = minpack.lm::nls.lm.control(maxiter = 200)
+  )
+  
+  # ---------------------------
+  # Predictions & residuals
+  # ---------------------------
+  pred  <- stats::predict(fit)
+  resid <- infil - pred
+  
+  # ---------------------------
+  # Goodness-of-fit statistics
+  # ---------------------------
+  rmse  <- sqrt(mean(resid^2))
+  mae   <- mean(abs(resid))
+  nrmse <- rmse / (max(infil) - min(infil)) * 100
+  pbias <- 100 * sum(resid) / sum(infil)
+  
+  r2  <- 1 - sum(resid^2) / sum((infil - mean(infil))^2)
+  nse <- r2
+  
+  aic <- stats::AIC(fit)
+  
+  # ---------------------------
+  # Structured tidy output
+  # ---------------------------
+  list(
+    model = "Horton",
+    
+    params = data.frame(
+      fc = coef(fit)[["fc"]],
+      f0 = coef(fit)[["f0"]],
+      k  = coef(fit)[["k"]]
+    ),
+    
+    fitted = data.frame(
+      time      = time,
+      observed  = infil,
+      predicted = pred,
+      residual  = resid
+    ),
+    
+    stats = data.frame(
+      RMSE  = rmse,
+      MAE   = mae,
+      NRMSE = nrmse,
+      PBIAS = pbias,
+      R2    = r2,
+      NSE   = nse,
+      AIC   = aic
+    ),
+    
+    nls_obj = fit
+  )
+}
+
+# Philip model
+fit_philip <- function(data, time, rate, na.rm = TRUE) {
+  
+  # ---------------------------
+  # Tidy evaluation of columns
+  # ---------------------------
+  time  <- data[[deparse(substitute(time))]]
+  infil <- data[[deparse(substitute(rate))]]
+  
+  # ---------------------------
+  # Handle NA values
+  # ---------------------------
+  if (na.rm) {
+    ok <- stats::complete.cases(time, infil)
+    time  <- time[ok]
+    infil <- infil[ok]
+  }
+  
+  # ---------------------------
+  # Basic checks
+  # ---------------------------
+  if (!is.numeric(time) || !is.numeric(infil))
+    stop("time and rate must be numeric.")
+  
+  if (length(time) < 5)
+    stop("At least 5 observations are required.")
+  
+  # ---------------------------
+  # Ensure increasing time
+  # ---------------------------
+  ord <- order(time)
+  time  <- time[ord]
+  infil <- infil[ord]
+  
+  # Avoid zero time (division by sqrt)
+  if (any(time <= 0))
+    stop("All time values must be > 0 for the Philip model.")
+  
+  # ---------------------------
+  # Philip infiltration equation
+  # f(t) = fc + 0.5 * S * t^(-1/2)
+  # ---------------------------
+  philip_fun <- function(t, fc, S) {
+    fc + 0.5 * S * t^(-0.5)
+  }
+  
+  # ---------------------------
+  # Smart starting values
+  # ---------------------------
+  
+  # steady infiltration from tail
+  fc_start <- mean(tail(infil, max(3, floor(length(infil) * 0.1))))
+  
+  # sorptivity via correct linearization:
+  # (f - fc) ~ 1/sqrt(t)
+  z <- 1 / sqrt(time)
+  y <- infil - fc_start
+  
+  valid <- y > 0
+  if (sum(valid) >= 2) {
+    slope <- coef(stats::lm(y[valid] ~ z[valid]))[2]
+    S_start <- 2 * slope
+  } else {
+    S_start <- diff(range(infil))  # safe fallback
+  }
+  
+  S_start <- max(S_start, 1e-6)
+  
+  # ---------------------------
+  # Nonlinear fit (Levenberg–Marquardt)
+  # ---------------------------
+  fit <- minpack.lm::nlsLM(
+    infil ~ philip_fun(time, fc, S),
+    start = list(fc = fc_start, S = S_start),
+    lower = c(fc = 0, S = 0),
+    control = minpack.lm::nls.lm.control(maxiter = 200)
+  )
+  
+  # ---------------------------
+  # Predictions & residuals
+  # ---------------------------
+  pred  <- stats::predict(fit)
+  resid <- infil - pred
+  
+  # ---------------------------
+  # Goodness-of-fit statistics
+  # ---------------------------
+  rmse <- sqrt(mean(resid^2))
+  mae  <- mean(abs(resid))
+  nrmse <- rmse / (max(infil) - min(infil)) * 100
+  pbias <- 100 * sum(resid) / sum(infil)
+  
+  r2  <- 1 - sum(resid^2) / sum((infil - mean(infil))^2)
+  nse <- 1 - sum(resid^2) / sum((infil - mean(infil))^2)
+  
+  aic <- stats::AIC(fit)
+  
+  # ---------------------------
+  # Structured tidy output
+  # ---------------------------
+  list(
+    model = "Philip",
+    
+    params = data.frame(
+      fc = coef(fit)[["fc"]],
+      S  = coef(fit)[["S"]]
+    ),
+    
+    fitted = data.frame(
+      time      = time,
+      observed  = infil,
+      predicted = pred,
+      residual  = resid
+    ),
+    
+    stats = data.frame(
+      RMSE  = rmse,
+      MAE   = mae,
+      NRMSE = nrmse,
+      PBIAS = pbias,
+      R2    = r2,
+      NSE   = nse,
+      AIC   = aic
+    ),
+    
+    nls_obj = fit
+  )
+}
+
+
+# Kostiakov model
+fit_kostiakov <- function(data, time, rate, na.rm = TRUE) {
+  
+  # ---------------------------
+  # Extract vectors safely
+  # ---------------------------
+  time  <- data[[deparse(substitute(time))]]
+  infil <- data[[deparse(substitute(rate))]]
+  
+  # ---------------------------
+  # Remove NA
+  # ---------------------------
+  if (na.rm) {
+    ok <- stats::complete.cases(time, infil)
+    time  <- time[ok]
+    infil <- infil[ok]
+  }
+  
+  # ---------------------------
+  # Checks
+  # ---------------------------
+  if (!is.numeric(time) || !is.numeric(infil))
+    stop("time and rate must be numeric.")
+  
+  if (length(time) < 5)
+    stop("At least 5 observations required.")
+  
+  if (any(time <= 0))
+    stop("Kostiakov model requires time > 0.")
+  
+  # ensure increasing time
+  ord <- order(time)
+  time  <- time[ord]
+  infil <- infil[ord]
+  
+  # ---------------------------
+  # Kostiakov rate model
+  # f(t) = c * t^(-m)
+  # ---------------------------
+  kostiakov_fun <- function(t, c, m) {
+    c * t^(-m)
+  }
+  
+  # ---------------------------
+  # Smart starting values
+  # log–log linearization
+  # ---------------------------
+  log_fit <- stats::lm(log(infil) ~ log(time))
+  m_start <- -coef(log_fit)[2]
+  c_start <- exp(coef(log_fit)[1])
+  
+  # constrain to physical range
+  m_start <- min(max(m_start, 1e-4), 0.99)
+  c_start <- max(c_start, 1e-4)
+  
+  # ---------------------------
+  # Robust nonlinear fit
+  # ---------------------------
+  fit <- minpack.lm::nlsLM(
+    infil ~ kostiakov_fun(time, c, m),
+    start = list(c = c_start, m = m_start),
+    lower = c(0, 0),
+    upper = c(Inf, 1),
+    control = minpack.lm::nls.lm.control(maxiter = 200)
+  )
+  
+  # ---------------------------
+  # Predictions & residuals
+  # ---------------------------
+  pred  <- stats::predict(fit)
+  resid <- infil - pred
+  
+  # ---------------------------
+  # Goodness-of-fit metrics
+  # ---------------------------
+  rmse  <- sqrt(mean(resid^2))
+  mae   <- mean(abs(resid))
+  nrmse <- rmse / (max(infil) - min(infil)) * 100
+  pbias <- 100 * sum(resid) / sum(infil)
+  
+  r2  <- 1 - sum(resid^2) / sum((infil - mean(infil))^2)
+  nse <- r2  # identical formulation
+  
+  aic <- stats::AIC(fit)
+  
+  # ---------------------------
+  # Structured output
+  # ---------------------------
+  list(
+    model = "Kostiakov",
+    
+    params = data.frame(
+      c = coef(fit)[["c"]],
+      m = coef(fit)[["m"]]
+    ),
+    
+    fitted = data.frame(
+      time      = time,
+      observed  = infil,
+      predicted = pred,
+      residual  = resid
+    ),
+    
+    stats = data.frame(
+      RMSE  = rmse,
+      MAE   = mae,
+      NRMSE = nrmse,
+      PBIAS = pbias,
+      R2    = r2,
+      NSE   = nse,
+      AIC   = aic
+    ),
+    
+    nls_obj = fit
+  )
 }
 
 
